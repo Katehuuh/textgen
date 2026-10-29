@@ -29,6 +29,7 @@ from modules.image_utils import (
 )
 from modules.logging_colors import logger
 from modules.text_generation import get_max_prompt_length
+from modules.utils import has_mtp_tensors
 
 try:
     import flash_attn
@@ -199,7 +200,9 @@ class Exllamav3Model:
         # Initialize draft model for speculative decoding
         draft_model = None
         draft_cache = None
-        if shared.args.spec_type == 'none' and shared.args.model_draft and shared.args.model_draft.lower() not in ["", "none"]:
+        num_draft_tokens = 0
+        has_model_draft = shared.args.model_draft and shared.args.model_draft.lower() not in ["", "none"]
+        if shared.args.spec_type == 'none' and has_model_draft:
             logger.info(f"Loading draft model for speculative decoding: {shared.args.model_draft}")
 
             draft_path = Path(shared.args.model_draft)
@@ -211,18 +214,22 @@ class Exllamav3Model:
             else:
                 draft_config = Config.from_directory(str(draft_path))
                 draft_model = Model.from_config(draft_config)
-        elif shared.args.spec_type == 'draft-mtp' and 'mtp' in config.model_classes and any('mtp.' in k or '.eh_proj.' in k for k in config.stc.tensor_file_map):
-            logger.info("Loading the model's MTP head for speculative decoding")
+        elif shared.args.spec_type == 'draft-mtp' and 'mtp' in config.model_classes and has_mtp_tensors(config.stc.tensor_file_map):
+            logger.info("Loading the model's MTP head for speculative decoding" + (f" (spec-type none would use {shared.args.model_draft} instead)" if has_model_draft else ""))
             draft_model = Model.from_config(config, component="mtp")
         elif shared.args.spec_type != 'none':
             logger.warning(f"spec-type {shared.args.spec_type} is not available for this model with ExLlamav3, speculative decoding disabled.")
 
         if draft_model is not None:
+            num_draft_tokens = shared.args.draft_max
+            if draft_model.caps.get("dflash_draft"):  # a DFlash drafter drafts at most one block
+                num_draft_tokens = min(num_draft_tokens, draft_model.caps["default_draft_size"])
+
             # Verifying drafted tokens needs extra cache room
-            cache_kwargs['max_history'] = max(shared.args.draft_max, draft_model.caps.get("default_draft_size", 4))
+            cache_kwargs['max_history'] = max(num_draft_tokens, draft_model.caps.get("default_draft_size", 4))
             draft_cache = Cache(draft_model, max_num_tokens=max_tokens, layer_type=layer_type, **cache_kwargs)
             draft_model.load(progressbar=True, use_per_device=split)
-            logger.info(f"Draft model loaded successfully. Max speculative tokens: {shared.args.draft_max}")
+            logger.info(f"Draft model loaded successfully. Max speculative tokens: {num_draft_tokens}")
             load_params['draft_model'] = draft_model  # DFlash drafters add to the main model's VRAM budget
 
         cache = Cache(model, max_num_tokens=max_tokens, layer_type=layer_type, **cache_kwargs)
@@ -237,7 +244,7 @@ class Exllamav3Model:
             tokenizer=tokenizer,
             draft_model=draft_model,
             draft_cache=draft_cache,
-            num_draft_tokens=shared.args.draft_max if draft_model is not None else 0,
+            num_draft_tokens=num_draft_tokens,
         )
 
         result = cls()

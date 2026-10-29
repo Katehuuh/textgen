@@ -220,8 +220,8 @@ def create_event_handlers():
         shared.gradio['lora_menu_apply'].click(load_lora_wrapper, gradio('lora_menu'), gradio('model_status'), show_progress=False)
 
     shared.gradio['spec_type'].change(
-        spec_type_visibility_updates,
-        gradio('spec_type'),
+        loader_spec_overlay,
+        gradio('loader', 'spec_type'),
         gradio(*SPEC_TYPE_OUTPUTS),
         show_progress=False
     )

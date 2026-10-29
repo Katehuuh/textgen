@@ -1,5 +1,6 @@
 import math
 import queue
+import sys
 import threading
 from pathlib import Path
 from typing import Any, List, Tuple
@@ -118,6 +119,18 @@ class ConcurrentGenerator:
         self.thread.join(timeout=5)
 
 
+def release_moe_cpu(config):
+    # exllamav3 only stops a CPU MoE worker once its last offloaded layer unloads, and pins
+    # this process to spare cores once per process; undo both so the next model starts clean
+    for host in getattr(config, 'moe_cpu_hosts', {}).values():
+        host.shutdown()
+    mch = sys.modules.get('exllamav3.model.moe_cpu_host')
+    if mch is not None:
+        if mch._HOST_ORIG_CPUS is not None:
+            mch.apply_process_affinity(mch._HOST_ORIG_CPUS)
+        mch._HOST_AFFINITY_THREADS = mch._HOST_ORIG_CPUS = None
+
+
 class Exllamav3Model:
 
     @property
@@ -197,6 +210,15 @@ class Exllamav3Model:
         else:
             logger.info("No vision component in model config. Skipping multimodal setup.")
 
+        # Set after the vision load, which would otherwise spawn an idle CPU MoE worker
+        if shared.args.moe_cpu_split:
+            # The pinned arena lets experts that miss on the GPU be promoted into spare GPU slots
+            config.infer_params.moe_cpu_split = int(shared.args.moe_cpu_split)
+            config.infer_params.moe_cpu_pinned_arena = True
+            if shared.args.moe_cpu_threads:
+                # draft_moe_cpu_threads covers the MTP head, which shares this config
+                config.infer_params.moe_cpu_threads = config.infer_params.draft_moe_cpu_threads = int(shared.args.moe_cpu_threads)
+
         # Initialize draft model for speculative decoding
         draft_model = None
         draft_cache = None
@@ -220,22 +242,27 @@ class Exllamav3Model:
         elif shared.args.spec_type != 'none':
             logger.warning(f"spec-type {shared.args.spec_type} is not available for this model with ExLlamav3, speculative decoding disabled.")
 
-        if draft_model is not None:
-            num_draft_tokens = shared.args.draft_max
-            if draft_model.caps.get("dflash_draft"):  # a DFlash drafter drafts at most one block
-                num_draft_tokens = min(num_draft_tokens, draft_model.caps["default_draft_size"])
+        try:
+            if draft_model is not None:
+                num_draft_tokens = shared.args.draft_max
+                if draft_model.caps.get("dflash_draft"):  # a DFlash drafter drafts at most one block
+                    num_draft_tokens = min(num_draft_tokens, draft_model.caps["default_draft_size"])
 
-            # Verifying drafted tokens needs extra cache room
-            cache_kwargs['max_history'] = max(num_draft_tokens, draft_model.caps.get("default_draft_size", 4))
-            draft_cache = Cache(draft_model, max_num_tokens=max_tokens, layer_type=layer_type, **cache_kwargs)
-            draft_model.load(progressbar=True, use_per_device=split)
-            logger.info(f"Draft model loaded successfully. Max speculative tokens: {num_draft_tokens}")
-            load_params['draft_model'] = draft_model  # DFlash drafters add to the main model's VRAM budget
+                # Verifying drafted tokens needs extra cache room
+                cache_kwargs['max_history'] = max(num_draft_tokens, draft_model.caps.get("default_draft_size", 4))
+                draft_cache = Cache(draft_model, max_num_tokens=max_tokens, layer_type=layer_type, **cache_kwargs)
+                draft_model.load(progressbar=True, use_per_device=split)
+                logger.info(f"Draft model loaded successfully. Max speculative tokens: {num_draft_tokens}")
+                load_params['draft_model'] = draft_model  # DFlash drafters add to the main model's VRAM budget
 
-        cache = Cache(model, max_num_tokens=max_tokens, layer_type=layer_type, **cache_kwargs)
+            cache = Cache(model, max_num_tokens=max_tokens, layer_type=layer_type, **cache_kwargs)
 
-        # Load main model last
-        model.load(**load_params)
+            # Load main model last
+            model.load(**load_params)
+        except Exception:
+            release_moe_cpu(config)
+            raise
+
         tokenizer = Tokenizer.from_config(config)
 
         generator = Generator(
@@ -591,6 +618,8 @@ class Exllamav3Model:
                 self.model.unload()
             except Exception as e:
                 logger.warning(f"Error unloading main model: {e}")
+
+            release_moe_cpu(self.model.config)
 
         self.parallel_generator = None
         self.vision_model = None

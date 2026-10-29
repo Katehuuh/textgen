@@ -72,6 +72,8 @@ loaders_and_params = OrderedDict({
         'speculative_decoding_accordion',
         'enable_tp',
         'tp_backend',
+        'moe_cpu_split',
+        'moe_cpu_threads',
     ],
     'TensorRT-LLM': [
         'ctx_size',
@@ -334,6 +336,8 @@ def list_model_elements():
         'bf16',
         'enable_tp',
         'tp_backend',
+        'moe_cpu_split',
+        'moe_cpu_threads',
         'cfg_cache',
         'no_use_fast',
         'model_draft',

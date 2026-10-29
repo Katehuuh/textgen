@@ -115,6 +115,20 @@ def get_model_metadata(model):
             if 'torch_dtype' in metadata and metadata['torch_dtype'] == 'bfloat16':
                 model_settings['bf16'] = True
 
+        # ExLlamaV3 quants keep the MTP head when the source model had one
+        if model_settings['loader'] == 'ExLlamav3':
+            tensor_names = {}
+            index_path = model_path / 'model.safetensors.index.json'
+            if index_path.exists():
+                with open(index_path, 'r', encoding='utf-8') as f:
+                    tensor_names = json.load(f).get('weight_map', {})
+            elif (model_path / 'model.safetensors').exists():
+                with open(model_path / 'model.safetensors', 'rb') as f:
+                    tensor_names = json.loads(f.read(int.from_bytes(f.read(8), 'little')))
+
+            if any('mtp.' in k or '.eh_proj.' in k for k in tensor_names):
+                model_settings['spec_type'] = 'draft-mtp'
+
     # Try to find the Jinja instruct template
     path = model_path / 'tokenizer_config.json'
     template = None

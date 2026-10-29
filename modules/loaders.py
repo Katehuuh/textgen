@@ -68,6 +68,7 @@ loaders_and_params = OrderedDict({
         'model_draft',
         'model_draft_refresh',
         'draft_max',
+        'spec_type',
         'speculative_decoding_accordion',
         'enable_tp',
         'tp_backend',

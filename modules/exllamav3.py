@@ -169,8 +169,6 @@ class Exllamav3Model:
             logger.warning(f"Unrecognized cache type: {cache_type}. Falling back to fp16.")
             layer_type = CacheLayer_fp16
 
-        cache = Cache(model, max_num_tokens=max_tokens, layer_type=layer_type, **cache_kwargs)
-
         load_params = {'progressbar': True}
         split = None
         if shared.args.gpu_split:
@@ -198,7 +196,8 @@ class Exllamav3Model:
         else:
             logger.info("No vision component in model config. Skipping multimodal setup.")
 
-        # Initialize draft model for speculative decoding
+        # Initialize draft model for speculative decoding: a separate draft model (ExLlamaV3
+        # recognizes DFlash drafters from their config), else the model's own MTP head
         draft_model = None
         draft_cache = None
         if shared.args.model_draft and shared.args.model_draft.lower() not in ["", "none"]:
@@ -213,17 +212,31 @@ class Exllamav3Model:
             else:
                 draft_config = Config.from_directory(str(draft_path))
                 draft_model = Model.from_config(draft_config)
-                draft_cache = Cache(draft_model, max_num_tokens=max_tokens, layer_type=layer_type, **cache_kwargs)
+        elif shared.args.spec_type == 'draft-mtp' and 'mtp' in config.model_classes:
+            logger.info("Loading the model's MTP head for speculative decoding")
+            draft_model = Model.from_config(config, component="mtp")
+        elif shared.args.spec_type != 'none':
+            logger.warning(f"spec-type {shared.args.spec_type} is not available for this model with ExLlamav3, speculative decoding disabled.")
 
-                draft_load_params = {'progressbar': True}
-                if split:
-                    draft_load_params['use_per_device'] = split
+        # Verifying drafted tokens needs that much extra room in the cache
+        if draft_model is not None:
+            cache_kwargs['max_history'] = max(shared.args.draft_max, draft_model.caps.get("default_draft_size", 4))
 
-                draft_model.load(**draft_load_params)
-                logger.info(f"Draft model loaded successfully. Max speculative tokens: {shared.args.draft_max}")
+        cache = Cache(model, max_num_tokens=max_tokens, layer_type=layer_type, **cache_kwargs)
 
-        # Load main model last
-        model.load(**load_params)
+        if draft_model is not None:
+            # The draft cache must exist before the draft model is loaded
+            draft_cache = Cache(draft_model, max_num_tokens=max_tokens, layer_type=layer_type, **cache_kwargs)
+
+            # Some drafters (Gemma 4 assistant) are loaded by the target model's load() instead
+            if not draft_model.caps.get("load_with_target"):
+                draft_model.load(progressbar=True, use_per_device=split)
+            logger.info(f"Draft model loaded successfully. Max speculative tokens: {shared.args.draft_max}")
+
+        # Load main model last (a DFlash drafter adds to its VRAM budget), then warm up
+        # so kernel compilation and autotuning don't land on the first request
+        model.load(**load_params, draft_model=draft_model)
+        model.warmup(cache=cache, progressbar=True)
         tokenizer = Tokenizer.from_config(config)
 
         generator = Generator(
@@ -449,7 +462,7 @@ class Exllamav3Model:
 
                 step_tokens = result.get("token_ids")
                 if step_tokens is not None:
-                    self.last_completion_token_count += len(step_tokens)
+                    self.last_completion_token_count += step_tokens.shape[-1]
 
                 if chunk:
                     response_text += chunk

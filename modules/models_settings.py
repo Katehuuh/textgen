@@ -116,15 +116,16 @@ def get_model_metadata(model):
                 model_settings['bf16'] = True
 
             # MTP models: check the quant kept the MTP head (some exports drop it)
-            mtp_config = {**metadata, **metadata.get('text_config', {})}
+            mtp_config = {**metadata, **(metadata.get('text_config') or {})}
             if model_settings['loader'] == 'ExLlamav3' and (mtp_config.get('mtp_num_hidden_layers') or mtp_config.get('num_nextn_predict_layers')):
-                for path in model_path.glob('*.safetensors'):
+                for path in sorted(model_path.glob('*.safetensors'), reverse=True):  # the MTP head is usually in the last shard
                     try:
                         with open(path, 'rb') as f:
-                            header = json.loads(f.read(int.from_bytes(f.read(8), 'little')))
+                            size = int.from_bytes(f.read(8), 'little')
+                            header = json.loads(f.read(size)) if size < 100_000_000 else {}  # safetensors header limit
                     except (OSError, ValueError):  # e.g. a shard still downloading
                         continue
-                    if any('mtp.' in k or '.eh_proj.' in k for k in header):
+                    if utils.has_mtp_tensors(header):
                         model_settings['spec_type'] = 'draft-mtp'
                         break
 

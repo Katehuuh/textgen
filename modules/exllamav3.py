@@ -391,12 +391,13 @@ class Exllamav3Model:
 
             sampler = CustomSampler(ordered_samplers)
 
-        input_ids = self.tokenizer.encode(
-            prompt,
-            add_bos=state['add_bos_token'],
-            encode_special_tokens=True,
-            embeddings=image_embeddings,
-        )
+        with self.parallel_generator.lock:  # the tokenizer is not thread-safe and the generator thread uses it too
+            input_ids = self.tokenizer.encode(
+                prompt,
+                add_bos=state['add_bos_token'],
+                encode_special_tokens=True,
+                embeddings=image_embeddings,
+            )
 
         input_ids = input_ids[:, -get_max_prompt_length(state):]
 
@@ -481,7 +482,8 @@ class Exllamav3Model:
             return
 
         if not hasattr(self, '_id_to_piece'):
-            self._id_to_piece = self.tokenizer.get_id_to_piece_list(True)
+            with self.parallel_generator.lock:
+                self._id_to_piece = self.tokenizer.get_id_to_piece_list(True)
 
         id_to_piece = self._id_to_piece
 
@@ -555,13 +557,15 @@ class Exllamav3Model:
         add_bos = kwargs.pop('add_bos', True)
         if add_bos and self.tokenizer.bos_token and string.startswith(self.tokenizer.bos_token):
             add_bos = False
-        return self.tokenizer.encode(string, add_bos=add_bos, **kwargs)
+        with self.parallel_generator.lock:
+            return self.tokenizer.encode(string, add_bos=add_bos, **kwargs)
 
     def decode(self, ids, **kwargs):
         if isinstance(ids, torch.Tensor) and ids.dim() == 0:
             ids = ids.view(1)
 
-        return self.tokenizer.decode(ids, **kwargs)
+        with self.parallel_generator.lock:
+            return self.tokenizer.decode(ids, **kwargs)
 
     @property
     def last_prompt_token_count(self):

@@ -100,8 +100,8 @@ class ConcurrentGenerator:
     def submit(self, job) -> queue.Queue:
         q = queue.Queue()
         with self.lock:
+            self.generator.enqueue(job)  # first: a job it rejects must not stay registered
             self.job_queues[job] = q
-            self.generator.enqueue(job)
         self.has_jobs.set()
         return q
 

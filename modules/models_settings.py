@@ -116,11 +116,14 @@ def get_model_metadata(model):
                 model_settings['bf16'] = True
 
             # MTP models: check the quant kept the MTP head (some exports drop it)
-            text_config = metadata.get('text_config', metadata)
-            if model_settings['loader'] == 'ExLlamav3' and (text_config.get('mtp_num_hidden_layers') or text_config.get('num_nextn_predict_layers')):
+            mtp_config = {**metadata, **metadata.get('text_config', {})}
+            if model_settings['loader'] == 'ExLlamav3' and (mtp_config.get('mtp_num_hidden_layers') or mtp_config.get('num_nextn_predict_layers')):
                 for path in model_path.glob('*.safetensors'):
-                    with open(path, 'rb') as f:
-                        header = json.loads(f.read(int.from_bytes(f.read(8), 'little')))
+                    try:
+                        with open(path, 'rb') as f:
+                            header = json.loads(f.read(int.from_bytes(f.read(8), 'little')))
+                    except (OSError, ValueError):  # e.g. a shard still downloading
+                        continue
                     if any('mtp.' in k or '.eh_proj.' in k for k in header):
                         model_settings['spec_type'] = 'draft-mtp'
                         break

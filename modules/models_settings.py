@@ -99,11 +99,12 @@ def get_model_metadata(model):
             if 'pretrained_config' in metadata:
                 metadata = metadata['pretrained_config']
 
+            text_config = metadata.get('text_config') or {}  # may be null
             for k in ['max_position_embeddings', 'model_max_length', 'max_seq_len']:
                 if k in metadata:
                     value = metadata[k]
-                elif k in metadata.get('text_config', {}):
-                    value = metadata['text_config'][k]
+                elif k in text_config:
+                    value = text_config[k]
                 else:
                     continue
 
@@ -116,7 +117,7 @@ def get_model_metadata(model):
                 model_settings['bf16'] = True
 
             # MTP models: check the quant kept the MTP head (some exports drop it)
-            mtp_config = {**metadata, **(metadata.get('text_config') or {})}
+            mtp_config = {**metadata, **text_config}
             if model_settings['loader'] == 'ExLlamav3' and (mtp_config.get('mtp_num_hidden_layers') or mtp_config.get('num_nextn_predict_layers')):
                 for path in sorted(model_path.glob('*.safetensors'), reverse=True):  # the MTP head is usually in the last shard
                     try:

@@ -4,13 +4,13 @@ import time
 from modules import shared
 
 
-def _image_part(block):
-    """Convert an Anthropic base64 image block into an OpenAI image_url part."""
-    source = block.get('source', {})
-    if source.get('type') != 'base64':
-        return None
-    media_type = source.get('media_type', 'image/png')
-    return {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{source.get('data', '')}"}}
+def _image_parts(blocks):
+    """Convert Anthropic base64 image blocks into OpenAI image_url parts."""
+    return [
+        {"type": "image_url", "image_url": {"url": f"data:{b['source'].get('media_type', 'image/png')};base64,{b['source'].get('data', '')}"}}
+        for b in blocks
+        if isinstance(b, dict) and b.get('type') == 'image' and b.get('source', {}).get('type') == 'base64'
+    ]
 
 
 def convert_request(body: dict) -> dict:
@@ -70,7 +70,6 @@ def convert_request(body: dict) -> dict:
         elif role == 'user':
             # Handle tool_result blocks and regular content
             regular_parts = []
-            tool_images = []  # OpenAI tool messages are text-only, so their images follow in the user turn
             for block in content:
                 btype = block.get('type')
                 if btype == 'tool_result':
@@ -84,26 +83,20 @@ def convert_request(body: dict) -> dict:
                     # Convert tool_result to OpenAI tool message
                     tool_content = block.get('content', '')
                     if isinstance(tool_content, list):
-                        tool_images += filter(None, (_image_part(b) for b in tool_content if isinstance(b, dict) and b.get('type') == 'image'))
-                        tool_content = '\n'.join(
-                            b.get('text', '') for b in tool_content
-                            if isinstance(b, dict) and b.get('type') == 'text'
-                        )
+                        # Keep images: list content is read on any role, so they stay in the tool result
+                        tool_content = [{"type": "text", "text": b.get('text', '')} for b in tool_content if isinstance(b, dict) and b.get('type') == 'text'] + _image_parts(tool_content)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": block.get('tool_use_id', ''),
-                        "content": str(tool_content)
+                        "content": tool_content if isinstance(tool_content, list) else str(tool_content)
                     })
                 elif btype == 'text':
                     regular_parts.append({"type": "text", "text": block.get('text', '')})
                 elif btype == 'image':
-                    part = _image_part(block)
-                    if part:
-                        regular_parts.append(part)
+                    regular_parts += _image_parts([block])
                 elif btype == 'thinking':
                     pass  # Strip thinking blocks
 
-            regular_parts += tool_images
             if regular_parts:
                 if len(regular_parts) == 1 and regular_parts[0].get('type') == 'text':
                     messages.append({"role": "user", "content": regular_parts[0]['text']})
@@ -345,7 +338,7 @@ class StreamConverter:
                 })
             })
 
-        # Text content (may share a chunk with the end of the reasoning)
+        # Text content
         text_content = delta.get('content')
         if text_content:
             if self.in_thinking:
@@ -374,7 +367,6 @@ class StreamConverter:
                     "delta": {"type": "text_delta", "text": text_content}
                 })
             })
-            return events
 
         # Tool calls in delta
         chunk_tool_calls = delta.get('tool_calls')

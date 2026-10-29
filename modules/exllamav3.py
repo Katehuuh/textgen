@@ -199,7 +199,7 @@ class Exllamav3Model:
         # Initialize draft model for speculative decoding
         draft_model = None
         draft_cache = None
-        if shared.args.model_draft and shared.args.model_draft.lower() not in ["", "none"]:
+        if shared.args.spec_type == 'none' and shared.args.model_draft and shared.args.model_draft.lower() not in ["", "none"]:
             logger.info(f"Loading draft model for speculative decoding: {shared.args.model_draft}")
 
             draft_path = Path(shared.args.model_draft)
@@ -211,7 +211,7 @@ class Exllamav3Model:
             else:
                 draft_config = Config.from_directory(str(draft_path))
                 draft_model = Model.from_config(draft_config)
-        elif shared.args.spec_type == 'draft-mtp' and 'mtp' in config.model_classes:
+        elif shared.args.spec_type == 'draft-mtp' and 'mtp' in config.model_classes and any('mtp.' in k or '.eh_proj.' in k for k in config.stc.tensor_file_map):
             logger.info("Loading the model's MTP head for speculative decoding")
             draft_model = Model.from_config(config, component="mtp")
         elif shared.args.spec_type != 'none':
@@ -221,14 +221,14 @@ class Exllamav3Model:
             # Verifying drafted tokens needs extra cache room
             cache_kwargs['max_history'] = max(shared.args.draft_max, draft_model.caps.get("default_draft_size", 4))
             draft_cache = Cache(draft_model, max_num_tokens=max_tokens, layer_type=layer_type, **cache_kwargs)
-            if not draft_model.caps.get("load_with_target"):  # e.g. Gemma 4 assistant loads with the target
-                draft_model.load(progressbar=True, use_per_device=split)
-                logger.info(f"Draft model loaded successfully. Max speculative tokens: {shared.args.draft_max}")
+            draft_model.load(progressbar=True, use_per_device=split)
+            logger.info(f"Draft model loaded successfully. Max speculative tokens: {shared.args.draft_max}")
+            load_params['draft_model'] = draft_model  # DFlash drafters add to the main model's VRAM budget
 
         cache = Cache(model, max_num_tokens=max_tokens, layer_type=layer_type, **cache_kwargs)
 
         # Load main model last
-        model.load(**load_params, draft_model=draft_model)
+        model.load(**load_params)
         tokenizer = Tokenizer.from_config(config)
 
         generator = Generator(
@@ -446,6 +446,8 @@ class Exllamav3Model:
                     continue
                 if result is None:
                     break
+                if result.get("stage") == "error":
+                    raise result["error"]
                 chunk = result.get("text", "")
                 if return_top_tokens > 0:
                     self._capture_logprobs(result)
